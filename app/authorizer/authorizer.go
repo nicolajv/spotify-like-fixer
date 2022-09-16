@@ -28,12 +28,9 @@ func Authorize() *spotify.Client {
 
 	auth = spotifyauth.New(
 		spotifyauth.WithRedirectURL(redirectURI),
-		spotifyauth.WithScopes(spotifyauth.ScopeUserReadPrivate),
 		spotifyauth.WithClientID(os.Getenv(("SPOTIFY_ID"))),
 		spotifyauth.WithClientSecret(os.Getenv("SPOTIFY_SECRET")),
 		spotifyauth.WithScopes(
-			spotifyauth.ScopeUserFollowRead,
-			spotifyauth.ScopeUserFollowModify,
 			spotifyauth.ScopeUserLibraryRead,
 			spotifyauth.ScopeUserLibraryModify,
 		),

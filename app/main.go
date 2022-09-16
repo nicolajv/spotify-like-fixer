@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"strings"
@@ -11,8 +13,12 @@ import (
 )
 
 var client *spotify.Client
+var interactive *bool
 
 func main() {
+	interactive = flag.Bool("interactive", false, "use to perform non-exact matching, but require a prompt before replacement")
+	flag.Parse()
+
 	client = authorizer.Authorize()
 
 	likedTracks := getLikedTracks()
@@ -22,34 +28,37 @@ func main() {
 	replaced := 0
 
 	for _, track := range likedTracks {
-		searchString := prepareQuery(track)
-
-		result, err := client.Search(context.Background(), searchString, spotify.SearchTypeTrack)
-		if err != nil || len(result.Tracks.Tracks) == 0 || track.Name != result.Tracks.Tracks[0].Name || track.Album.Name != result.Tracks.Tracks[0].Album.Name {
-			failureMessage := fmt.Sprintf("Failed to search up %s by %s", track.Name, track.Artists[0].Name)
+		result, err := search(track)
+		if err != nil {
+			failureMessage := fmt.Sprintf("Failed to search up %s by %s with external id %s", track.Name, track.Artists[0].Name, track.ExternalIDs["isrc"])
 			fmt.Println(failureMessage)
-			fmt.Println(searchString)
-			// TODO Spotify has an issue with queries over 100 characters
-			// https://community.spotify.com/t5/Spotify-for-Developers/V1-API-Search-q-query-parameter-appears-to-have-a-limit-of-100/td-p/5398898
-			if len(searchString) > 100 {
-				fmt.Println("Query string is too long, continuing")
-				fmt.Println("")
-				continue
-			}
-			failureList = append(failureList, failureMessage)
 			fmt.Println("")
+			failureList = append(failureList, failureMessage)
 			continue
 		}
 
-		if result.Tracks.Tracks[0].ID == track.ID {
+		if result.ID == track.ID {
 			continue
 		}
 
 		fmt.Println(track.Name, "-", track.Artists[0].Name)
-		fmt.Println("No match!", "Liked id:", track.ID, "Searched id:", result.Tracks.Tracks[0].ID)
+		fmt.Println("No match!", "Liked id:", track.ID, "Searched id:", result.ID)
+		fmt.Println("No match!", "Liked isrc:", track.ExternalIDs["isrc"], "Searched isrc:", result.ExternalIDs["isrc"])
+
+		if *interactive {
+			fmt.Println(track.Name, "by", track.Artists[0].Name, "from", track.Album.Name)
+			fmt.Println("will be replaced with")
+			fmt.Println(result.Name, "by", result.Artists[0].Name, "from", result.Album.Name)
+
+			confirmation := WaitForConfirmation()
+			if !confirmation {
+				fmt.Println("")
+				continue
+			}
+		}
 
 		unlikeTrack(track.ID)
-		likeTrack(result.Tracks.Tracks[0].ID)
+		likeTrack(result.ID)
 		replaced++
 
 		fmt.Println("")
@@ -63,14 +72,6 @@ func main() {
 
 	fmt.Println("Replacements complete! Successful replacements:", replaced)
 	fmt.Println("Failed replacements:", len((failureList)))
-}
-
-func prepareQuery(track spotify.SavedTrack) string {
-	result := fmt.Sprintf("track:\"%s\"artist:\"%s\"album:\"%s\"", track.Name, track.Artists[0].Name, track.Album.Name)
-	result = strings.Replace(result, "'", "", -1)
-	result = strings.Replace(result, "(", "", -1)
-	result = strings.Replace(result, ")", "", -1)
-	return result
 }
 
 func getLikedTracks() []spotify.SavedTrack {
@@ -97,6 +98,50 @@ func getLikedTracks() []spotify.SavedTrack {
 	return finalList
 }
 
+func search(originalTrack spotify.SavedTrack) (*spotify.FullTrack, error) {
+	results, err := client.Search(context.Background(), fmt.Sprintf("isrc:\"%s\"", originalTrack.ExternalIDs["isrc"]), spotify.SearchTypeTrack, spotify.Limit(50))
+	if err != nil || len(results.Tracks.Tracks) == 0 {
+		return nil, errors.New("failed to search up track")
+	}
+
+	// If something in the list has the correct ID, return that
+	for _, track := range results.Tracks.Tracks {
+		if originalTrack.ID == track.ID && originalTrack.ExternalIDs["isrc"] == track.ExternalIDs["isrc"] {
+			return &track, nil
+		}
+	}
+
+	// If we can find something that matches all parameters, return that
+	for _, track := range results.Tracks.Tracks {
+		if originalTrack.Name == track.Name && originalTrack.Album.Name == track.Album.Name && originalTrack.Artists[0].Name == track.Artists[0].Name && originalTrack.ExternalIDs["isrc"] == track.ExternalIDs["isrc"] {
+			return &track, nil
+		}
+	}
+
+	// Otherwise if something matches album + artist, return that
+	for _, track := range results.Tracks.Tracks {
+		if originalTrack.Album.Name == track.Album.Name && originalTrack.Artists[0].Name == track.Artists[0].Name && originalTrack.ExternalIDs["isrc"] == track.ExternalIDs["isrc"] {
+			return &track, nil
+		}
+	}
+
+	// Otherwise return the first result that matches just the artist
+	for _, track := range results.Tracks.Tracks {
+		if originalTrack.Artists[0].Name == track.Artists[0].Name && originalTrack.ExternalIDs["isrc"] == track.ExternalIDs["isrc"] {
+			return &track, nil
+		}
+	}
+	// If there is still no match, return the first item from the correct artist, as long as we are in interactive mode
+	if *interactive {
+		for _, track := range results.Tracks.Tracks {
+			if originalTrack.Artists[0].Name == track.Artists[0].Name {
+				return &track, nil
+			}
+		}
+	}
+	return nil, errors.New("failed to search up track")
+}
+
 func unlikeTrack(trackId spotify.ID) {
 	fmt.Println("Unliking track:", trackId.String())
 	err := client.RemoveTracksFromLibrary(context.Background(), trackId)
@@ -111,4 +156,22 @@ func likeTrack(trackId spotify.ID) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func WaitForConfirmation() bool {
+	var input string
+
+	fmt.Printf("Is this okay? [y/n]: ")
+	_, err := fmt.Scan(&input)
+	if err != nil {
+		panic(err)
+	}
+
+	input = strings.TrimSpace(input)
+	input = strings.ToLower(input)
+
+	if input == "y" || input == "yes" {
+		return true
+	}
+	return false
 }
